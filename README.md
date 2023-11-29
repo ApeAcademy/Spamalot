@@ -1,0 +1,1 @@
+This is an example NFT bot created to be used with cHaOsNeT using [Silverback](https://github.com/ApeWorX/silverback/).
