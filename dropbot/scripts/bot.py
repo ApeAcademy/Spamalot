@@ -1,58 +1,81 @@
-from typing import Set
-from ape import project, chain
-from ape.logging import logger
-from silverback import SilverbackApp
+import asyncio
+import json
+import os
+from pathlib import Path
+
+from ape import chain, project
+from ape.api import BlockAPI
+from ape.contracts.base import ContractContainer, ContractInstance
+from ape.logging import get_logger
+from ethpm_types import ContractType
+from silverback import SilverbackApp, SilverbackStartupState
 from taskiq import Context, TaskiqDepends
 
 # Constants
-BLOCK_INTERVAL = 100  # Adjust this to the desired block interval for NFT minting
+BLOCK_INTERVAL = 25  # Adjust this to the desired block interval for NFT minting
+TOKEN_ID_START = int(os.environ.get("TOKEN_ID_START", 0))
 
-# Data Structures
-tracked_addresses: Set[str] = set()
-
-# NFT Contract
-NFT_CONTRACT = project.erc721  # Replace this with the correct path to your NFT contract
+# Get our own logger so we can set the level without affecting everything else
+logger = get_logger("dropbot")
+logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 # App Initialization
 app = SilverbackApp()
 
+# Load manifest to build contract to skip compilation
+ERC721 = ContractContainer(
+    ContractType(**json.load(open(Path(__file__).parent / ".build" / "erc721.json")))
+)
+
+
 @app.on_startup()
-def initialize(state):
+def initialize(startup_state: SilverbackStartupState, context: Context = TaskiqDepends()):
     """
     Startup function to deploy the NFT contract and initialize the state.
     """
-    logger.info("Deploying NFT contract")
-    nft_contract = NFT_CONTRACT.deploy(sender=app.signer)  # Ensure you have correct deploy method in your contract
-    state.nft_contract = nft_contract
-    state.tracked_addresses = tracked_addresses
+    nft_contract = ERC721.deploy(
+        sender=app.signer
+    )  # Ensure you have correct deploy method in your contract
+    logger.info(f"Deployed NFT contract to {nft_contract.address}")
+    context.state.nft_contract = nft_contract
+    context.state.tracked_addresses = set()
+    context.state.next_id = TOKEN_ID_START
 
-@app.on_(chain.blocks)
-async def track_active_addresses(block, context: Context = TaskiqDepends()):
+
+async def track_active_addresses(block: BlockAPI, context: Context):
     """
     Handler that tracks active addresses from transactions in each block.
     """
-    if block.number % BLOCK_INTERVAL == 0:
-        context.state.tracked_addresses.clear()  # Reset the set every `n` blocks
-
     # Track active addresses
     transactions = block.transactions
     for tx in transactions:
+        logger.debug(f"Now tracking account {tx.sender}")
         context.state.tracked_addresses.add(tx.sender)
 
-@app.on_(chain.blocks)
-async def mint_and_distribute_nfts(block, context: Context = TaskiqDepends()):
+
+async def mint_and_distribute_nfts(block: BlockAPI, context: Context):
     """
     Handler that mints and distributes NFTs to active addresses every `n` blocks.
     """
-    if block.number % BLOCK_INTERVAL == 0 and context.state.tracked_addresses:
-        logger.info("Minting and distributing NFTs to active addresses")
+    if block.number and block.number % BLOCK_INTERVAL == 0 and context.state.tracked_addresses:
+        logger.debug("Minting and distributing NFTs to active addresses")
         for address in context.state.tracked_addresses:
             try:
-                context.state.nft_contract.mint(address, sender=app.signer)  # Adjust based on your contract's API
+                context.state.nft_contract.mint(
+                    address, context.state.next_id, sender=app.signer
+                )  # Adjust based on your contract's API
+                context.state.next_id += 1
                 logger.info(f"NFT minted and sent to {address}")
             except Exception as e:
                 logger.error(f"Error minting NFT for {address}: {e}")
 
-# Run the application
-if __name__ == "__main__":
-    app.run()
+        # Clear so we aren't sending NFT to the same addresses every time
+        context.state.tracked_addresses.clear()
+
+
+@app.on_(chain.blocks)
+async def handle_blocks(block: BlockAPI, context: Context = TaskiqDepends()):
+    logger.debug(f"New block: {block.number}")
+    await asyncio.gather(
+        track_active_addresses(block, context), mint_and_distribute_nfts(block, context)
+    )
