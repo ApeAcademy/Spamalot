@@ -1,9 +1,7 @@
 name: Release
 on:
-  # release:
-  #   types: [published]
-  # TODO DELETEME testing
-  pull_request:
+  release:
+    types: [published]
 
 env:
   REGISTRY: ghcr.io
