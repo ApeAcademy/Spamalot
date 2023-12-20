@@ -1,9 +1,0 @@
-{
-  "name": "spamalot",
-  "max": 3,
-  "image": "ghcr.io/apeacademy/spamalot:latest",
-  "resources": {
-    "cpu": 256,
-    "memory": 512
-  }
-}
